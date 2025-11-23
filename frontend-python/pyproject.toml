@@ -1,0 +1,8 @@
+[project]
+name = "frontend-python"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+dependencies = [
+    "coinbase-agentkit>=0.7.4",
+]
