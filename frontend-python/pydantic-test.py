@@ -11,7 +11,28 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from x402.clients.httpx import x402HttpxClient  # async client with auto x402 payments  # type: ignore
 
+# env importer
 load_dotenv()
+LLM_BASE_URL = os.getenv("LLM_PROVIDER")
+match LLM_BASE_URL:
+    case "flock.io":
+        base_url = "https://api.flock.io/v1"
+        model_name = "qwen3-235b-a22b-instruct-2507"
+        api_key = os.getenv("FLOCKIO_API_KEY")
+    case "openai":
+        base_url = None  # defaults to openai
+        model_name = "gpt-4o-mini"
+        api_key = os.getenv("OPENAI_API_KEY")
+    case _:
+        raise ValueError("LLM_BASE_URL should be defined")
+
+assert api_key
+
+print(f"""
+base_url: {base_url if base_url is not None else "(default) openai"}
+model_name: {model_name}
+api_key: {api_key[:4]}...{api_key[-4:]}
+""")
 
 # ---------- Dependencies for the agent ----------
 
@@ -30,10 +51,10 @@ class Deps:
 
 agent = Agent(
     model=OpenAIChatModel(
-        model_name="gpt-4o-mini",
+        model_name=model_name,
         provider=OpenAIProvider(
-            # base_url="http://localhost:8000/v1",
-            api_key=os.getenv("LLM_KEY"),
+            base_url=base_url,
+            api_key=api_key,
         )
     ),
     deps_type=Deps,
@@ -105,13 +126,6 @@ def build_deps() -> Deps:
     - You can swap this to share the same key as an AgentKit EthAccountWalletProvider
       if you want everything on one wallet.
     """
-    # private_key = os.environ.get("PRIVATE_KEY")
-    # if not private_key:
-    #     raise RuntimeError("PRIVATE_KEY environment variable is required")
-
-    # if not private_key.startswith("0x"):
-    #     raise RuntimeError("PRIVATE_KEY must start with 0x")
-
     account = Account.from_key(os.environ.get("PRIVATE_KEY"))
     return Deps(account=account)
 
