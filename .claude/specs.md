@@ -2,33 +2,47 @@
 
 ## Architecture Overview
 
-하이브리드 배포 아키텍처: Vercel(Frontend) + Local MacBook(Backend) + Cloudflare Tunnel
+Mini PC (Proxmox) + Tailscale + Vercel 배포 아키텍처
 
 ```mermaid
 graph TB
-    subgraph Public_Cloud["☁️ Public Cloud"]
+    subgraph Internet["🌐 Internet"]
         User([👤 User])
-        Vercel[Vercel Hosting<br/>Frontend UI]
-        CF_Edge[Cloudflare Edge<br/>DNS / SSL / Tunnel]
+        Vercel[Vercel Frontend]
     end
     
-    subgraph Local_MacBook["💻 Local MacBook"]
-        Cloudflared[cloudflared Daemon]
-        Backend_LLM[backend-llm<br/>Port 8000]
-        Backend_Proxmox[backend-proxmox<br/>Port 4021]
-        LLM[Local LLM Engine]
-        Proxmox[Proxmox Controller]
+    subgraph MiniPC["🖥️ Mini PC - Proxmox Host"]
+        subgraph LXC["LXC: backend-services"]
+            Tailscale[Tailscale Client]
+            Backend_LLM[backend-llm :8000]
+            Backend_Proxmox[backend-proxmox :4021]
+        end
+        
+        Sandbox[Sandbox Zone<br/>User Containers]
+        PVE_API[Proxmox API :8006]
     end
 
-    User -->|1. Access UI| Vercel
-    Vercel -->|2. Return Static| User
-    User -->|3. API Request| CF_Edge
-    CF_Edge <-->|4. Secure Tunnel| Cloudflared
-    Cloudflared -->|5. Localhost Proxy| Backend_LLM
+    User --> Vercel
+    Vercel -->|Tailscale Funnel| Tailscale
+    Tailscale --> Backend_LLM
     Backend_LLM --> Backend_Proxmox
-    Backend_Proxmox --> LLM
-    Backend_Proxmox --> Proxmox
+    Backend_Proxmox --> PVE_API
+    PVE_API --> Sandbox
 ```
+
+### LXC Specifications
+
+| 컨테이너 | CPU | RAM | Disk | 서비스 |
+|----------|-----|-----|------|--------|
+| backend-services | 2 Core | 2GB | 20GB | backend-llm, backend-proxmox, Tailscale |
+
+### Network Flow
+
+1. User → Vercel Frontend (Static)
+2. Frontend → Tailscale Funnel URL (HTTPS)
+3. Tailscale → backend-services LXC :8000
+4. backend-llm → backend-proxmox :4021 (localhost)
+5. backend-proxmox → Proxmox API → User Container 생성
 
 ---
 

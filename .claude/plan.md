@@ -2,243 +2,164 @@
 
 ## Overview
 
-하이브리드 아키텍처 배포를 위한 단계별 구현 계획입니다.
+Mini PC (Proxmox) + Tailscale + Vercel 배포 계획
 
 ---
 
-## Phase 1: Prerequisites 확인
+## Prerequisites
 
-### 1.1 로컬 환경 확인
-- [ ] Node.js 18+ 설치 확인: `node -v`
-- [ ] pnpm 설치 확인: `pnpm -v`
-- [ ] Python 3.11+ 설치 확인: `python --version`
-- [ ] uv 설치 확인: `uv --version`
-- [ ] cloudflared 설치 확인: `cloudflared --version`
-
-### 1.2 설치 명령어 (필요시)
-```bash
-# pnpm 설치
-npm install -g pnpm
-
-# uv 설치
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# cloudflared 설치 (macOS)
-brew install cloudflared
-```
-
-### 1.3 계정 및 API Key 준비
+### 필수 준비물
 
 | 항목 | 확인 | 비고 |
 |------|------|------|
+| Proxmox Host | [ ] | Mini PC에 설치됨 |
+| Tailscale 계정 | [ ] | [tailscale.com](https://tailscale.com) |
 | Vercel 계정 | [ ] | [vercel.com](https://vercel.com) |
-| Cloudflare 계정 | [ ] | [dash.cloudflare.com](https://dash.cloudflare.com) |
-| 도메인 (Cloudflare 연결) | [ ] | `api.mydomain.com` 사용 예정 |
-| OpenAI API Key | [ ] | [platform.openai.com](https://platform.openai.com) (택1) |
-| Flock.io API Key | [ ] | [flock.io](https://flock.io) (택1) |
+| OpenAI API Key | [ ] | LLM Provider (택1) |
 | EVM Wallet Private Key | [ ] | x402 결제 서명용 |
-| Proxmox 접근권한 | [ ] | 이미 설정되어 있어야 함 |
-
-> [!NOTE]
-> LLM Provider는 OpenAI 또는 Flock.io 중 **하나만** 준비하면 됩니다.
 
 ---
 
-## Phase 2: Backend 설정 및 실행
+## Phase 1: LXC 생성
 
-### 2.1 Backend-Proxmox 설정
+### 1.1 CT 템플릿 다운로드
 ```bash
-cd backend-proxmox
-cp .env-local .env
-# .env 파일 편집하여 필요한 값 설정
-uv sync
+# Proxmox 호스트에서
+pveam update
+pveam download local ubuntu-22.04-standard_22.04-1_amd64.tar.zst
 ```
 
-### 2.2 Backend-LLM 설정
+### 1.2 backend-services LXC 생성
 ```bash
-cd backend-llm
+pct create 100 local:vztmpl/ubuntu-22.04-standard_22.04-1_amd64.tar.zst \
+  --hostname backend-services \
+  --cores 2 \
+  --memory 2048 \
+  --swap 0 \
+  --rootfs local-lvm:20 \
+  --net0 name=eth0,bridge=vmbr0,ip=dhcp \
+  --features nesting=1
+
+pct start 100
+```
+
+### 1.3 기본 환경 설정
+```bash
+# LXC 접속
+pct enter 100
+
+# 시스템 업데이트
+apt update && apt upgrade -y
+
+# 필수 패키지 설치
+apt install -y python3.11 python3-pip git curl
+
+# uv 설치
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+```
+
+---
+
+## Phase 2: Tailscale 설치
+
+### 2.1 Tailscale 설치
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+### 2.2 Tailscale 연결
+```bash
+# 인증 URL이 표시됨 → 브라우저에서 로그인
+tailscale up
+
+# 상태 확인
+tailscale status
+```
+
+### 2.3 Tailscale Funnel 설정
+```bash
+# 8000 포트를 HTTPS로 공개
+tailscale funnel 8000
+
+# Funnel URL 확인 (예: https://backend-services.tailnet-xxxx.ts.net)
+tailscale funnel status
+```
+
+---
+
+## Phase 3: Backend 배포
+
+### 3.1 레포지토리 클론
+```bash
+cd /opt
+git clone https://github.com/your-repo/infra402.git
+cd infra402
+```
+
+### 3.2 환경변수 설정
+```bash
+# backend-proxmox
+cd /opt/infra402/backend-proxmox
 cp .example.env .env
+# nano .env → PVE_HOST, PVE_TOKEN_ID 등 설정
+
+# backend-llm
+cd /opt/infra402/backend-llm
+cp .example.env .env
+# nano .env → OPENAI_API_KEY, PRIVATE_KEY 등 설정
 ```
 
-`.env` 파일 내용:
-```env
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-your-key-here
-PRIVATE_KEY=0xYourWalletPrivateKey
-BACKEND_BASE_URL=http://localhost:4021
-```
-
-### 2.3 CORS 설정 확인
-
-현재 `pydantic-server.py`에서 CORS는 `allow_origins=["*"]`로 설정되어 있음.
-프로덕션에서는 아래로 변경 권장:
-
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://infra402.vercel.app",
-        "http://localhost:5173",  # 로컬 개발용
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-### 2.4 Backend 실행 (터미널 2개 필요)
-
-**Terminal 1 - Proxmox Backend:**
+### 3.3 서비스 실행
 ```bash
-cd backend-proxmox
-uv run python main.py
-# → http://localhost:4021
+# Terminal 1: backend-proxmox
+cd /opt/infra402/backend-proxmox
+uv sync
+uv run python main.py  # :4021
+
+# Terminal 2: backend-llm
+cd /opt/infra402/backend-llm
+uv sync
+uv run python pydantic-server.py  # :8000
 ```
 
-**Terminal 2 - LLM Backend:**
+### 3.4 (선택) systemd 서비스 등록
 ```bash
-cd backend-llm
-uv run python pydantic-server.py
-# → http://localhost:8000
+# /etc/systemd/system/infra402.service
+cat > /etc/systemd/system/infra402.service << 'EOF'
+[Unit]
+Description=infra402 Backend Services
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/infra402/backend-llm
+ExecStart=/root/.local/bin/uv run python pydantic-server.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable infra402
+systemctl start infra402
 ```
 
 ---
 
-## Phase 3: Cloudflare Tunnel 설정
-
-### 3.1 Cloudflare 로그인
-```bash
-cloudflared tunnel login
-# 브라우저에서 인증 완료
-```
-
-### 3.2 터널 생성
-```bash
-cloudflared tunnel create infra402-api
-# → Tunnel ID 및 credentials 파일 생성됨
-```
-
-### 3.3 DNS 설정
-```bash
-cloudflared tunnel route dns infra402-api api.mydomain.com
-# → Cloudflare DNS에 CNAME 레코드 자동 추가
-```
-
-### 3.4 설정 파일 생성
-
-`~/.cloudflared/config.yml`:
-```yaml
-tunnel: infra402-api
-credentials-file: /Users/hyeokx/.cloudflared/<TUNNEL_ID>.json
-
-ingress:
-  - hostname: api.mydomain.com
-    service: http://localhost:8000
-  - service: http_status:404
-```
-
-### 3.5 터널 실행
-```bash
-cloudflared tunnel run infra402-api
-```
-
-### 3.6 (선택) 시스템 서비스로 등록
-```bash
-sudo cloudflared service install
-sudo launchctl start com.cloudflare.cloudflared
-```
-
----
-
-## Phase 4: Frontend 설정 및 Vercel 배포
+## Phase 4: Vercel 연동
 
 ### 4.1 환경변수 설정
-```bash
-cd frontend
-echo "VITE_CHAT_API_BASE=https://api.mydomain.com" > .env
+
+Vercel Dashboard → Settings → Environment Variables:
+```
+VITE_CHAT_API_BASE=https://backend-services.tailnet-xxxx.ts.net
 ```
 
-### 4.2 Frontend 코드 수정 (API URL 사용)
-
-`src/` 내 API 호출 시 환경변수 사용 확인:
-```typescript
-const API_BASE = import.meta.env.VITE_CHAT_API_BASE || 'http://localhost:8000';
-fetch(`${API_BASE}/chat`, { ... });
-```
-
-### 4.3 로컬 테스트
-```bash
-cd frontend
-pnpm install
-pnpm dev
-# http://localhost:5173 에서 확인
-```
-
-### 4.4 Vercel 배포
-
-**Option A - Vercel CLI:**
-```bash
-npm i -g vercel
-cd frontend
-vercel
-# 프롬프트 따라 설정
-```
-
-**Option B - Vercel Dashboard:**
-1. [vercel.com](https://vercel.com) 접속
-2. New Project → Import Git Repository
-3. Root Directory: `frontend` 설정
-4. Environment Variables 추가:
-   - `VITE_CHAT_API_BASE` = `https://api.mydomain.com`
-5. Deploy 클릭
-
----
-
-## Phase 5: 통합 테스트
-
-### 5.1 Backend 헬스체크
-```bash
-curl https://api.mydomain.com/info
-# → JSON 응답 확인
-```
-
-### 5.2 Frontend-Backend 연동 테스트
-1. https://infra402.vercel.app 접속
-2. Chat UI에서 메시지 전송
-3. 응답 수신 확인
-
-### 5.3 CORS 테스트
-브라우저 개발자 도구 → Network → API 요청이 200 OK인지 확인
-
----
-
-## Phase 6: 운영 안정화
-
-### 6.1 MacBook Sleep 방지
-**System Settings → Lock Screen:**
-- "Turn display off on power adapter when inactive" → Never
-- "Prevent automatic sleeping on power adapter when display is off" → Enable
-
-**또는 caffeinate 사용:**
-```bash
-caffeinate -dimsu &
-```
-
-### 6.2 Backend 자동 시작 스크립트
-
-`~/scripts/start-infra402.sh`:
-```bash
-#!/bin/bash
-cd ~/git/infra402/backend-proxmox && uv run python main.py &
-cd ~/git/infra402/backend-llm && uv run python pydantic-server.py &
-cloudflared tunnel run infra402-api &
-echo "All services started"
-```
-
-### 6.3 모니터링
-- Cloudflare Dashboard에서 터널 상태 확인
-- Vercel Dashboard에서 Frontend 로그 확인
-- 로컬 터미널에서 Backend 로그 모니터링
+### 4.2 배포 확인
+1. Vercel에서 Frontend 재배포
+2. 브라우저에서 접속 테스트
+3. 개발자 도구 → Network에서 API 호출 확인
 
 ---
 
@@ -246,7 +167,7 @@ echo "All services started"
 
 | Issue | Solution |
 |-------|----------|
-| CORS Error | Backend CORS 설정에 Vercel 도메인 추가 |
-| Tunnel Offline | cloudflared 프로세스 재시작, 인터넷 연결 확인 |
-| Backend Not Responding | 포트 8000/4021 사용 중인지 확인 (`lsof -i :8000`) |
-| Vercel Build Fail | Root Directory가 `frontend`인지 확인 |
+| Tailscale 연결 안됨 | `tailscale up --reset` 후 재인증 |
+| LXC에서 Tailscale 안됨 | `pct set 100 -features nesting=1` 확인 |
+| Funnel URL 접근 안됨 | `tailscale funnel 8000` 재실행 |
+| Backend 응답 없음 | `lsof -i :8000` 으로 포트 확인 |
