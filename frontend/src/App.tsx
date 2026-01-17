@@ -235,13 +235,14 @@ function App() {
     setError(null);
 
     try {
-      // 1. Select requirement (exact scheme, base-sepolia)
+      // 1. Select requirement (exact scheme, correct network)
+      const targetNetwork = import.meta.env.VITE_DEFAULT_NETWORK || "base-sepolia";
       const requirement = pendingPayment.accepts.find(
-        (r) => r.scheme === "exact" && r.network === "base-sepolia"
+        (r) => r.scheme === "exact" && r.network === targetNetwork
       );
 
       if (!requirement) {
-        throw new Error("No supported payment scheme found (need exact on base-sepolia)");
+        throw new Error(`No supported payment scheme found (need exact on ${targetNetwork})`);
       }
 
       // 2. Prepare data

@@ -68,6 +68,9 @@ export function encodeX402Header(header: X402Header): string {
 }
 
 export function getChainId(network: string): number {
+  if (import.meta.env.VITE_DEFAULT_CHAIN_ID) {
+      return parseInt(import.meta.env.VITE_DEFAULT_CHAIN_ID, 10);
+  }
   switch (network) {
     case 'base-sepolia':
       return 84532;
