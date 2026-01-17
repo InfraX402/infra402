@@ -1,6 +1,32 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  ConnectWallet,
+  Wallet,
+  WalletDropdown,
+  WalletDropdownDisconnect,
+} from "@coinbase/onchainkit/wallet";
+import { Address, Avatar, Name, Identity, EthBalance } from "@coinbase/onchainkit/identity";
+import { useAccount, useSignTypedData } from "wagmi";
+import {
+  encodeX402Header,
+  generateNonce,
+  getChainId,
+  EIP712_DOMAIN_TYPES,
+  type PaymentRequest,
+  type PaymentRequirement,
+  type X402Header,
+  X402_VERSION,
+} from "./x402";
+import { Hex } from "viem";
 
 type ChatMessage = {
   id: string;
@@ -23,32 +49,43 @@ const markdownComponents: Components = {
 };
 
 const chatApiBase =
-  (import.meta.env.VITE_CHAT_API_BASE as string | undefined)?.replace(/\/$/, "") ||
-  "http://localhost:8000";
+  (import.meta.env.VITE_CHAT_API_BASE as string | undefined)?.replace(
+    /\/$/,
+    "",
+  ) || "http://localhost:8000";
 
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
 function App() {
+  const { address, isConnected } = useAccount();
+  const { signTypedDataAsync } = useSignTypedData();
+
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: randomId(),
       role: "assistant",
-      content:
-        "hello! how can I help you?",
+      content: "hello! how can I help you?",
     },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<Info | null>(null);
+  const [pendingPayment, setPendingPayment] = useState<PaymentRequest | null>(
+    null,
+  );
+  
+  // Track the message that triggered the payment to retry it
+  const [pendingMessageContent, setPendingMessageContent] = useState<string | null>(null);
+
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLElement | null>(null);
 
   const canSend = useMemo(
-    () => Boolean(input.trim()) && !loading,
-    [input, loading],
+    () => Boolean(input.trim()) && !loading && !pendingPayment,
+    [input, loading, pendingPayment],
   );
 
   useEffect(() => {
@@ -60,53 +97,105 @@ function App() {
         const data = (await resp.json()) as Info;
         if (!cancelled) setInfo(data);
       } catch {
-        // ignore; UI will just show placeholders
+        // ignore
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatApiBase]);
+  }, []);
 
   useEffect(() => {
     if (!messagesRef.current) return;
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
-  }, [messages, loading]);
+  }, [messages, loading, pendingPayment]);
 
-  async function sendChat(event?: FormEvent) {
+  async function sendChat(
+    event?: FormEvent,
+    overrideContent?: string,
+    paymentHeaders?: Record<string, string>,
+  ) {
     event?.preventDefault();
     setError(null);
-    const content = input.trim();
+    
+    const content = overrideContent ?? input.trim();
     if (!content) return;
     if (loading) return;
-    const userMessage: ChatMessage = {
-      id: randomId(),
-      role: "user",
-      content,
-    };
-    const historyForRequest = [...messages, userMessage].map(
-      ({ role, content: text }) => ({ role, content: text }),
-    );
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
+
+    // If this is a new message (not a retry), add to history
+    if (!overrideContent) {
+      const userMessage: ChatMessage = {
+        id: randomId(),
+        role: "user",
+        content,
+      };
+      setMessages((prev) => [...prev, userMessage]);
+      setInput("");
+    }
+    
     setLoading(true);
 
+    // Build history for the request
+    // Note: If retrying, the last user message is already in `messages` state
+    const historyForRequest = messages.map(({ role, content: text }) => ({
+      role,
+      content: text,
+    }));
+    // If it was a new message, we just added it to state but state update might be async,
+    // so we manually ensure it's in the payload if needed. 
+    // Actually, simple way: filter out the very last message if it matches `content` to avoid dupe, then append.
+    // Or just trust `messages` is updated on next render.
+    // For safety with async state, let's reconstruct history carefully:
+    // If overrideContent is present, it means we are retrying the *last* user message which IS in `messages`.
+    // If overrideContent is NOT present, we just added `userMessage` to state.
+    // Let's rely on `messages` + `userMessage` pattern for new, and just `messages` for retry.
+    
+    let historyPayload = [];
+    if (overrideContent) {
+       historyPayload = historyForRequest.map(m => ({role: m.role, content: m.content}));
+    } else {
+        // This logic is slightly brittle with React batching.
+        // Better: Pass the *full* intended history to this function or construct it here.
+        // For now, let's assume standard flow:
+        // We added to state. We send `message: content`. Backend reconstructs prompt using history + message.
+        // So `history` should NOT include the current `message`.
+        historyPayload = messages.map(({role, content}) => ({role, content}));
+    }
+
     try {
+      const body: any = {
+        message: content,
+        history: historyPayload,
+      };
+      
+      if (paymentHeaders) {
+        body.payment_headers = paymentHeaders;
+      }
+
       const response = await fetch(`${chatApiBase}/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: content, history: historyForRequest }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Request failed: ${response.status} ${body}`);
+        const text = await response.text();
+        throw new Error(`Request failed: ${response.status} ${text}`);
       }
 
       const data = await response.json();
-      const reply = data?.reply ?? "No content returned from the model.";
+
+      if (data.payment_request) {
+        // 402 encountered
+        setPendingPayment(data.payment_request);
+        setPendingMessageContent(content);
+        // Do NOT add an assistant message yet.
+        return;
+      }
+
+      const reply = data?.reply ?? "No content returned.";
 
       const assistantMessage: ChatMessage = {
         id: randomId(),
@@ -115,6 +204,11 @@ function App() {
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      
+      // Clear pending state on success
+      setPendingPayment(null);
+      setPendingMessageContent(null);
+
     } catch (err) {
       const reason =
         err instanceof Error ? err.message : "Unexpected error during request.";
@@ -129,7 +223,89 @@ function App() {
       ]);
     } finally {
       setLoading(false);
-      inputRef.current?.focus();
+      // Only focus if we aren't waiting for payment
+      if (!pendingPayment) {
+          inputRef.current?.focus();
+      }
+    }
+  }
+
+  async function handlePayment() {
+    if (!pendingPayment || !address || !pendingMessageContent) return;
+    setError(null);
+
+    try {
+      // 1. Select requirement (exact scheme, base-sepolia)
+      const requirement = pendingPayment.accepts.find(
+        (r) => r.scheme === "exact" && r.network === "base-sepolia"
+      );
+
+      if (!requirement) {
+        throw new Error("No supported payment scheme found (need exact on base-sepolia)");
+      }
+
+      // 2. Prepare data
+      const chainId = getChainId(requirement.network);
+      const nonce = generateNonce();
+      const validAfter = BigInt(Math.floor(Date.now() / 1000) - 60);
+      const validBefore = BigInt(
+        Math.floor(Date.now() / 1000) + requirement.maxTimeoutSeconds
+      );
+      const value = BigInt(requirement.maxAmountRequired);
+
+      const domain = {
+        name: requirement.extra?.name ?? "USD Coin",
+        version: requirement.extra?.version ?? "2",
+        chainId,
+        verifyingContract: requirement.asset as Address,
+      } as const;
+
+      const message = {
+        from: address,
+        to: requirement.payTo as Address,
+        value,
+        validAfter,
+        validBefore,
+        nonce,
+      };
+
+      // 3. Sign
+      const signature = await signTypedDataAsync({
+        domain,
+        types: EIP712_DOMAIN_TYPES,
+        primaryType: "TransferWithAuthorization",
+        message,
+      });
+
+      // 4. Construct Header
+      const header: X402Header = {
+        x402Version: X402_VERSION,
+        scheme: "exact",
+        network: requirement.network,
+        payload: {
+          signature,
+          authorization: {
+            from: address,
+            to: requirement.payTo as Address,
+            value: value.toString(),
+            validAfter: validAfter.toString(),
+            validBefore: validBefore.toString(),
+            nonce,
+          },
+        },
+      };
+
+      const encodedHeader = encodeX402Header(header);
+
+      // 5. Retry Chat
+      // We pass the pending content and the new headers
+      await sendChat(undefined, pendingMessageContent, {
+        "X-Payment": encodedHeader,
+      });
+
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "Payment failed");
     }
   }
 
@@ -147,27 +323,47 @@ function App() {
       {
         id: randomId(),
         role: "assistant",
-        content:
-          "hello! how can I help you?",
+        content: "hello! how can I help you?",
       },
     ]);
     setError(null);
     setInput("");
+    setPendingPayment(null);
+    setPendingMessageContent(null);
     inputRef.current?.focus();
   }
 
   return (
     <div className="page">
       <header className="hero">
-        <div>
-          <h1>Infra402</h1>
-          <p className="lede">
-            Chat with your agent to explore infra402 :D<br></br>Provision containers and pay using x402! Cheap and accessible~
-          </p>
-          <div className="meta">
-            <span>Base URL: {info?.base_url ?? "…"}</span>
-            <span>Model: {info?.model_name ?? "…"}</span>
-            <span>API Key: {info?.api_key ?? "…"}</span>
+        <div className="flex justify-between items-start w-full">
+          <div>
+            <h1>Infra402</h1>
+            <p className="lede">
+              Chat with your agent to explore infra402 :D<br />
+              Provision containers and pay using x402!
+            </p>
+            <div className="meta">
+              <span>Base URL: {info?.base_url ?? "…"}</span>
+              <span>Model: {info?.model_name ?? "…"}</span>
+            </div>
+          </div>
+          <div className="wallet-container">
+            <Wallet>
+              <ConnectWallet>
+                <Avatar className="h-6 w-6" />
+                <Name />
+              </ConnectWallet>
+              <WalletDropdown>
+                <Identity className="px-4 pt-3 pb-2" hasCopyAddressOnClick>
+                  <Avatar />
+                  <Name />
+                  <Address />
+                  <EthBalance />
+                </Identity>
+                <WalletDropdownDisconnect />
+              </WalletDropdown>
+            </Wallet>
           </div>
         </div>
         <div className="hero-actions">
@@ -181,7 +377,9 @@ function App() {
         <section className="messages" ref={messagesRef}>
           {messages.map((msg) => (
             <article key={msg.id} className={`message ${msg.role}`}>
-              <div className="avatar">{msg.role === "user" ? "You" : "i402"}</div>
+              <div className="avatar">
+                {msg.role === "user" ? "You" : "i402"}
+              </div>
               <div className="bubble">
                 <div className="markdown">
                   <ReactMarkdown
@@ -194,10 +392,34 @@ function App() {
               </div>
             </article>
           ))}
-          {loading && <div className="typing">Model is thinking…</div>}
+          
+          {pendingPayment && (
+            <article className="message assistant payment-request">
+              <div className="avatar">i402</div>
+              <div className="bubble payment-bubble">
+                <p><strong>Payment Required</strong></p>
+                <p>This action requires a micropayment.</p>
+                {!isConnected ? (
+                   <p className="text-sm mt-2 text-yellow-400">Please connect your wallet first.</p>
+                ) : (
+                   <button 
+                     className="pay-button" 
+                     onClick={handlePayment} 
+                     disabled={loading}
+                   >
+                     {loading ? "Processing..." : "Sign & Pay"}
+                   </button>
+                )}
+              </div>
+            </article>
+          )}
+
+          {loading && !pendingPayment && (
+            <div className="typing">Model is thinking…</div>
+          )}
         </section>
 
-        <form className="composer" onSubmit={sendChat}>
+        <form className="composer" onSubmit={(e) => sendChat(e)}>
           <textarea
             ref={inputRef}
             placeholder="Ask something..."
@@ -205,6 +427,7 @@ function App() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             rows={3}
+            disabled={!!pendingPayment}
           />
           <div className="composer-actions">
             {error && <div className="error">{error}</div>}

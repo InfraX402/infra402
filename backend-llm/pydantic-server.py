@@ -1,9 +1,10 @@
 import os
+import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Dict, Optional
 
 from dotenv import load_dotenv
-from eth_account import Account
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from decimal import Decimal
@@ -12,8 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
-
-from x402.clients.httpx import x402HttpxClient  # async client with auto x402 payments  # type: ignore
 
 # env importer
 load_dotenv()
@@ -38,17 +37,24 @@ model_name: {model_name}
 api_key: {api_key[:4]}...{api_key[-4:]}
 """)
 
+# ---------- Exceptions ----------
+
+class ClientSidePaymentRequired(Exception):
+    """Raised when the backend returns 402, signaling the frontend must pay."""
+    def __init__(self, payment_info: Dict[str, Any]):
+        self.payment_info = payment_info
+        super().__init__("Payment Required")
+
 # ---------- Dependencies for the agent ----------
 
 @dataclass
 class Deps:
     """
     Dependencies injected into tools.
-
-    Right now this just holds the EVM account that will be used
-    to sign x402 payment headers.
+    
+    Holds optional payment headers provided by the frontend after a successful payment.
     """
-    account: Account
+    payment_headers: Optional[Dict[str, str]] = None
 
 
 # ---------- Define the agent ----------
@@ -150,11 +156,33 @@ class ManagedContainer(BaseModel):
     vmStatus: dict[str, Any] | None = None
 
 
-def _client(account: Account) -> x402HttpxClient:
-    return x402HttpxClient(
-        account=account,
+def _client(deps: Deps) -> httpx.AsyncClient:
+    """
+    Create a standard httpx client.
+    If headers are present in deps, they are attached.
+    """
+    headers = {}
+    if deps.payment_headers:
+        headers.update(deps.payment_headers)
+    
+    return httpx.AsyncClient(
         base_url=backend_base_url(),
+        headers=headers,
     )
+
+async def _check_response(resp: httpx.Response):
+    """
+    Check for 402 and raise ClientSidePaymentRequired.
+    Otherwise raise for status.
+    """
+    if resp.status_code == 402:
+        await resp.aread()
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        raise ClientSidePaymentRequired(data)
+    resp.raise_for_status()
 
 
 def _estimate_price(
@@ -226,9 +254,9 @@ async def lease_container(
         requester=requester,
     )
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post("/lease/container", json=payload.model_dump(exclude_none=True))
-        resp.raise_for_status()
+        await _check_response(resp)
         return LeaseResponse.model_validate(resp.json())
 
 
@@ -251,9 +279,9 @@ async def exec_container_command(
     """
     payload = ExecRequest(command=command, extraArgs=extraArgs)
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post(f"/management/exec/{ctid}", json=payload.model_dump(exclude_none=True))
-        resp.raise_for_status()
+        await _check_response(resp)
         return ExecResponse.model_validate(resp.json())
 
 
@@ -276,9 +304,9 @@ async def exec_lease_command(
     """
     payload = ExecRequest(command=command, extraArgs=extraArgs)
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post(f"/lease/{ctid}/command", json=payload.model_dump(exclude_none=True))
-        resp.raise_for_status()
+        await _check_response(resp)
         return ExecResponse.model_validate(resp.json())
 
 
@@ -306,9 +334,9 @@ async def renew_lease(
 
     payload = RenewLeaseRequest(runtimeMinutes=runtimeMinutes)
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post(f"/lease/{ctid}/renew", json=payload.model_dump())
-        resp.raise_for_status()
+        await _check_response(resp)
         return LeaseResponse.model_validate(resp.json())
 
 
@@ -327,9 +355,9 @@ async def open_container_console(
     """
     payload = ConsoleRequest(consoleType=consoleType)
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post(f"/management/console/{ctid}", json=payload.model_dump(exclude_none=True))
-        resp.raise_for_status()
+        await _check_response(resp)
         return ConsoleResponse.model_validate(resp.json())
 
 
@@ -348,9 +376,9 @@ async def open_lease_console(
     """
     payload = ConsoleRequest(consoleType=consoleType)
 
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.post(f"/management/console/{ctid}", json=payload.model_dump(exclude_none=True))
-        resp.raise_for_status()
+        await _check_response(resp)
         return ConsoleResponse.model_validate(resp.json())
 
 
@@ -359,9 +387,9 @@ async def list_managed_containers(ctx: RunContext[Deps]) -> list[ManagedContaine
     """
     Retrieve active and past leases via `/management/list`.
     """
-    async with _client(ctx.deps.account) as client:
+    async with _client(ctx.deps) as client:
         resp = await client.get("/management/list")
-        resp.raise_for_status()
+        await _check_response(resp)
         raw_list = resp.json()
         return [ManagedContainer.model_validate(item) for item in raw_list]
 
@@ -387,28 +415,18 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     history: list[ChatMessage] = []
+    payment_headers: Optional[Dict[str, str]] = None
 
 
 class ChatResponse(BaseModel):
     reply: str
+    payment_request: Optional[Dict[str, Any]] = None
 
 
 class InfoResponse(BaseModel):
     base_url: str
     model_name: str
     api_key: str
-
-
-def build_deps() -> Deps:
-    """
-    Build dependencies for each request.
-
-    - Uses PRIVATE_KEY from env.
-    - You can swap this to share the same key as an AgentKit EthAccountWalletProvider
-      if you want everything on one wallet.
-    """
-    account = Account.from_key(os.environ.get("PRIVATE_KEY"))
-    return Deps(account=account)
 
 
 def build_prompt(message: str, history: list[ChatMessage]) -> str:
@@ -424,7 +442,7 @@ def build_prompt(message: str, history: list[ChatMessage]) -> str:
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
-    deps = build_deps()
+    deps = Deps(payment_headers=req.payment_headers)
 
     prompt = build_prompt(req.message, req.history)
 
@@ -434,12 +452,22 @@ async def chat(req: ChatRequest) -> ChatResponse:
             deps=deps,
         )
         reply = result.output
+        return ChatResponse(reply=reply)
+        
+    except ClientSidePaymentRequired as exc:
+        # Stop here and tell frontend to pay
+        return ChatResponse(
+            reply="Payment Required. Please confirm the transaction in your wallet.",
+            payment_request=exc.payment_info
+        )
+        
     except ValueError as exc:
         reply = str(exc)
+        return ChatResponse(reply=reply)
+        
     except Exception as exc:
         reply = f"Request failed: {exc}"
-
-    return ChatResponse(reply=reply)
+        return ChatResponse(reply=reply)
 
 
 @app.get("/info", response_model=InfoResponse)
