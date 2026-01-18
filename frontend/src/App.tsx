@@ -63,6 +63,16 @@ function App() {
           setIsMiniApp(true);
           // Signal to the client that the app is ready to be displayed
           await sdk.actions.ready();
+
+          // Apply safe area insets from the client context
+          const context = sdk.context;
+          if (context?.client?.safeAreaInsets) {
+            const { top, bottom, left, right } = context.client.safeAreaInsets;
+            document.documentElement.style.setProperty("--safe-area-top", `${top}px`);
+            document.documentElement.style.setProperty("--safe-area-bottom", `${bottom}px`);
+            document.documentElement.style.setProperty("--safe-area-left", `${left}px`);
+            document.documentElement.style.setProperty("--safe-area-right", `${right}px`);
+          }
         }
       } catch (err) {
         console.warn("MiniApp SDK initialization failed:", err);
