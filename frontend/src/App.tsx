@@ -137,29 +137,18 @@ function App() {
 
     // Build history for the request
     // Note: If retrying, the last user message is already in `messages` state
-    const historyForRequest = messages.map(({ role, content: text }) => ({
+    let historyPayload = messages.map(({ role, content: text }) => ({
       role,
       content: text,
     }));
-    // If it was a new message, we just added it to state but state update might be async,
-    // so we manually ensure it's in the payload if needed. 
-    // Actually, simple way: filter out the very last message if it matches `content` to avoid dupe, then append.
-    // Or just trust `messages` is updated on next render.
-    // For safety with async state, let's reconstruct history carefully:
-    // If overrideContent is present, it means we are retrying the *last* user message which IS in `messages`.
-    // If overrideContent is NOT present, we just added `userMessage` to state.
-    // Let's rely on `messages` + `userMessage` pattern for new, and just `messages` for retry.
-    
-    let historyPayload = [];
+
     if (overrideContent) {
-       historyPayload = historyForRequest.map(m => ({role: m.role, content: m.content}));
-    } else {
-        // This logic is slightly brittle with React batching.
-        // Better: Pass the *full* intended history to this function or construct it here.
-        // For now, let's assume standard flow:
-        // We added to state. We send `message: content`. Backend reconstructs prompt using history + message.
-        // So `history` should NOT include the current `message`.
-        historyPayload = messages.map(({role, content}) => ({role, content}));
+        // If retrying, the last message in history is likely the user message we are sending.
+        // Remove it to avoid duplication since backend appends `message`.
+        const lastMsg = historyPayload[historyPayload.length - 1];
+        if (lastMsg && lastMsg.role === 'user' && lastMsg.content === overrideContent) {
+            historyPayload.pop();
+        }
     }
 
     try {

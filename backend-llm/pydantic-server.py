@@ -168,6 +168,7 @@ def _client(deps: Deps) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=backend_base_url(),
         headers=headers,
+        timeout=60.0,
     )
 
 async def _check_response(resp: httpx.Response):
@@ -466,6 +467,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
         return ChatResponse(reply=reply)
         
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         reply = f"Request failed: {exc}"
         return ChatResponse(reply=reply)
 
