@@ -239,7 +239,7 @@ async def lease_container(
     if not confirmPurchase:
         estimate = _estimate_price(runtimeMinutes, cores=cores, memory_mb=memoryMB, disk_gb=diskGB)
         raise ValueError(
-            f"Please confirm the purchase ({estimate}) and re-run with confirmPurchase=True."
+            f"Please confirm the purchase ({estimate})!"
         )
     if not password:
         raise ValueError("Please provide a container password (min 6 chars) before leasing a container.")
