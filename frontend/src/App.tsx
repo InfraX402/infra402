@@ -1,6 +1,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { sdk } from "@farcaster/miniapp-sdk";
 
 type ChatMessage = {
   id: string;
@@ -50,6 +51,11 @@ function App() {
     () => Boolean(input.trim()) && !loading,
     [input, loading],
   );
+
+  // Base App MiniApp SDK - notify app is ready
+  useEffect(() => {
+    sdk.actions.ready();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

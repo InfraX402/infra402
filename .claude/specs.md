@@ -170,3 +170,37 @@ infra402/
 - 안정적인 인터넷 연결 필요
 - Local LLM 모델 및 Proxmox 노드 접근 필요
 - Cloudflare 계정 및 도메인 필요
+
+---
+
+## Base App MiniApp Integration
+
+### Overview
+Frontend를 Base App의 MiniApp으로 변환하여 Farcaster 생태계에서 실행할 수 있도록 합니다.
+
+### SDK Integration
+```typescript
+// App.tsx
+import { sdk } from '@farcaster/miniapp-sdk';
+import { useEffect } from 'react';
+
+function App() {
+  useEffect(() => {
+    sdk.actions.ready();
+  }, []);
+  // ...
+}
+```
+
+### Manifest Location
+- **Path**: `public/.well-known/farcaster.json`
+- **Required Fields**: `accountAssociation`, `miniapp`
+
+### Account Association
+1. [Base Build Tool](https://www.base.dev/preview?tab=account) 접속
+2. 배포된 앱 URL 입력
+3. **전용 지갑**으로 서명 (Ownership 분리)
+4. `header`, `payload`, `signature` 복사하여 manifest에 적용
+
+### Reference
+- [Migration Guide](https://github.com/Basten1209/base_app_migration/blob/main/BASE_APP_MIGRATION_GUIDE.md)
