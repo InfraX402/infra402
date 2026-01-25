@@ -5,7 +5,7 @@ from typing import Any, Literal, Dict, Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from decimal import Decimal
 
@@ -86,6 +86,29 @@ agent = Agent(
 
 def backend_base_url() -> str:
     return os.getenv("BACKEND_BASE_URL", "http://localhost:4021").rstrip("/")
+
+
+def _forward_auth_headers(request: Request) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for header_name in ("X-Wallet", "X-Payment"):
+        value = request.headers.get(header_name)
+        if value:
+            headers[header_name] = value
+    return headers
+
+
+async def _proxy_get_json(path: str, request: Request) -> Any:
+    async with httpx.AsyncClient(base_url=backend_base_url(), timeout=20.0) as client:
+        resp = await client.get(path, headers=_forward_auth_headers(request))
+
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    return resp.json()
 
 
 class LeaseRequest(BaseModel):
@@ -563,6 +586,16 @@ async def info() -> InfoResponse:
         model_name=model_name,
         api_key=masked_key,
     )
+
+
+@app.get("/stats/node")
+async def stats_node(request: Request) -> Any:
+    return await _proxy_get_json("/stats/node", request)
+
+
+@app.get("/stats/lxc")
+async def stats_lxc(request: Request) -> Any:
+    return await _proxy_get_json("/stats/lxc", request)
 
 
 # Test with
