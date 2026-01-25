@@ -16,6 +16,15 @@ class PVEError(Exception):
 _LOG = logging.getLogger("pve")
 _DEBUG = os.getenv("PVE_DEBUG", "").lower() in {"1", "true", "yes"}
 
+def _json_preview(value: Any, *, limit: int = 4000) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = repr(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...(truncated)"
+
 
 @dataclass
 class PVEConfig:
@@ -104,11 +113,21 @@ async def _request(
     async with httpx.AsyncClient(verify=cfg.verify_ssl, timeout=30) as client:
         resp = await client.request(method, url, params=params, data=data, headers=headers)
         if _DEBUG:
-            _LOG.info("PVE request %s %s", method, url)
-            _LOG.info("PVE status %s content-type=%s", resp.status_code, resp.headers.get("content-type"))
-            _LOG.info("PVE body preview: %s", resp.text[:500])
+            # Use WARNING to ensure it shows up with default uvicorn logging config.
+            _LOG.warning("PVE request %s %s", method, url)
+            _LOG.warning(
+                "PVE status %s content-type=%s",
+                resp.status_code,
+                resp.headers.get("content-type"),
+            )
+            _LOG.warning("PVE body preview: %s", resp.text[:1000])
 
         if resp.status_code >= 400:
+            if _DEBUG:
+                try:
+                    _LOG.warning("PVE error json: %s", _json_preview(resp.json()))
+                except json.JSONDecodeError:
+                    pass
             raise PVEError(f"PVE request failed {resp.status_code}: {resp.text}")
 
         try:
@@ -118,6 +137,9 @@ async def _request(
                 f"PVE returned non-JSON body for {url}: "
                 f"status={resp.status_code}, body={resp.text[:200]}"
             ) from e
+
+        if _DEBUG:
+            _LOG.warning("PVE response json: %s", _json_preview(payload))
 
         return payload
 
@@ -213,6 +235,8 @@ async def run_command(
         f"/nodes/{cfg.node}/lxc/{vmid}/exec",
         data=payload,
     )
+    if _DEBUG:
+        _LOG.warning("PVE lxc exec response: %s", _json_preview(resp))
     upid = resp.get("data")
     status = await wait_for_task(cfg, upid)
     log_resp = await _request(
@@ -221,6 +245,8 @@ async def run_command(
         f"/nodes/{cfg.node}/tasks/{quote(upid, safe='')}/log",
         params={"start": 0},
     )
+    if _DEBUG:
+        _LOG.warning("PVE task log response: %s", _json_preview(log_resp))
     logs = [entry.get("t", "") for entry in (log_resp.get("data") or [])]
     return {"upid": upid, "status": status, "output": "\n".join(logs).strip()}
 

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
@@ -24,6 +26,8 @@ router = APIRouter(
     tags=["management"],
 )
 
+_LOG = logging.getLogger("management")
+
 
 @router.post("/exec/{ctid}", response_model=ExecResponse)
 async def exec_command(ctid: str, body: ExecRequest, request: Request) -> ExecResponse:
@@ -34,6 +38,7 @@ async def exec_command(ctid: str, body: ExecRequest, request: Request) -> ExecRe
     try:
         result = await run_command(cfg, vmid=ctid, command=body.command, extra_args=body.extraArgs)
     except PVEError as exc:
+        _LOG.warning("PVE exec failed ctid=%s: %s", ctid, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"PVE error: {exc}",
