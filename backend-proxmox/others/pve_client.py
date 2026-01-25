@@ -1,5 +1,6 @@
 import asyncio
 import os
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, quote, urlsplit
@@ -10,6 +11,10 @@ import httpx
 
 class PVEError(Exception):
     pass
+
+
+_LOG = logging.getLogger("pve")
+_DEBUG = os.getenv("PVE_DEBUG", "").lower() in {"1", "true", "yes"}
 
 
 @dataclass
@@ -98,10 +103,10 @@ async def _request(
     }
     async with httpx.AsyncClient(verify=cfg.verify_ssl, timeout=30) as client:
         resp = await client.request(method, url, params=params, data=data, headers=headers)
-        print("Request:", url)
-        print("PVE DEBUG:", resp.status_code, url)
-        print("Content-Type:", resp.headers.get("content-type"))
-        print("Body preview:", resp.text[:500])
+        if _DEBUG:
+            _LOG.info("PVE request %s %s", method, url)
+            _LOG.info("PVE status %s content-type=%s", resp.status_code, resp.headers.get("content-type"))
+            _LOG.info("PVE body preview: %s", resp.text[:500])
 
         if resp.status_code >= 400:
             raise PVEError(f"PVE request failed {resp.status_code}: {resp.text}")

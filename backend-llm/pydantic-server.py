@@ -335,7 +335,7 @@ async def exec_lease_command(
     extraArgs: list[str] | None = None,
 ) -> ExecResponse:
     """
-    Execute a command on a leased container via `/lease/{ctid}/command`.
+    Execute a command on a leased container (compat alias).
 
     Required:
     - ctid: container ID
@@ -347,7 +347,7 @@ async def exec_lease_command(
     payload = ExecRequest(command=command, extraArgs=extraArgs)
 
     async with _client(ctx.deps) as client:
-        resp = await client.post(f"/lease/{ctid}/command", json=payload.model_dump(exclude_none=True))
+        resp = await client.post(f"/management/exec/{ctid}", json=payload.model_dump(exclude_none=True))
         await _check_response(resp)
         return ExecResponse.model_validate(resp.json())
 
@@ -410,18 +410,13 @@ async def open_lease_console(
     consoleType: str | None = "vnc",
 ) -> ConsoleResponse:
     """
-    Request console access for a leased container via `/management/console/{ctid}`.
+    Request console access for a leased container (compat alias).
 
     Args:
     - ctid: container ID
     - consoleType: "vnc" (default) or "spice"
     """
-    payload = ConsoleRequest(consoleType=consoleType)
-
-    async with _client(ctx.deps) as client:
-        resp = await client.post(f"/management/console/{ctid}", json=payload.model_dump(exclude_none=True))
-        await _check_response(resp)
-        return ConsoleResponse.model_validate(resp.json())
+    return await open_container_console(ctx, ctid=ctid, consoleType=consoleType)
 
 
 @agent.tool
