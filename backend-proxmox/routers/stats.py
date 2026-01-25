@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
 from others.auth import get_request_wallet
-from others.db import list_leases_by_owner
+from others.db import list_all_leases, list_leases_by_owner
 from others.pve_client import PVEError, get_config, get_lxc_status, get_node_status
 
 router = APIRouter(
@@ -59,8 +59,7 @@ def _cpu(usage: float | None, cores: int | None) -> CpuStats:
 
 
 @router.get("/node", response_model=NodeStatsResponse)
-async def get_node_stats(request: Request) -> NodeStatsResponse:
-    _ = get_request_wallet(request)
+async def get_node_stats() -> NodeStatsResponse:
     cfg = get_config()
     try:
         data = await get_node_status(cfg)
@@ -80,8 +79,14 @@ async def get_node_stats(request: Request) -> NodeStatsResponse:
 
 @router.get("/lxc", response_model=list[LxcStats])
 async def get_lxc_stats(request: Request) -> list[LxcStats]:
-    owner_wallet = get_request_wallet(request)
-    leases = list_leases_by_owner(owner_wallet)
+    owner_wallet = None
+    try:
+        owner_wallet = get_request_wallet(request)
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
+
+    leases = list_leases_by_owner(owner_wallet) if owner_wallet else list_all_leases()
     cfg = get_config()
     results: list[LxcStats] = []
 
