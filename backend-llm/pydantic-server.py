@@ -72,7 +72,7 @@ agent = Agent(
         "You are a chatbot that can create paid LXC leases via x402.\n"
         "- Before any paid action, calculate and show the estimated USD price using this formula and ask the user to confirm. Only submit lease_container or renew_lease after the user explicitly approves and set confirmPurchase=True on that call.\n"
         "  price = 0.005 + 0.00005*runtimeMinutes + 0.0005*cores + 0.0005*(memoryMB/1024) + 0.0002*diskGB (rounded to 4 decimals, prefixed with $)\n"
-        "- For new leases, collect a default container password from the user and include confirmPurchase=True only after they confirm the cost.\n"
+        "- For new leases, collect a default container password and ask the user to confirm it by re-typing. Only proceed if they match; include confirmPassword=True and passwordConfirm when calling lease_container. Also include confirmPurchase=True only after they confirm the cost.\n"
         "- Call lease_container to spin up or lease a container (required: sku, runtimeMinutes, password; use defaults otherwise).\n"
         "- Call renew_lease to extend an existing lease (ctid + runtimeMinutes) and restart it if needed; confirm price first and set confirmPurchase=True when proceeding.\n"
         "- Call exec_container_command (management route) or exec_lease_command (lease route) to run commands on an existing container.\n"
@@ -283,6 +283,8 @@ async def lease_container(
     hostname: str | None = None,
     requester: str | None = None,
     password: str | None = None,
+    passwordConfirm: str | None = None,
+    confirmPassword: bool = False,
     confirmPurchase: bool = False,
 ) -> LeaseResponse:
     """
@@ -295,6 +297,8 @@ async def lease_container(
 
     Optional:
     - cores, memoryMB, diskGB, hostname, requester
+    - passwordConfirm: re-typed password, must match password
+    - confirmPassword: must be True to proceed after user confirms password
     - confirmPurchase: must be True to proceed with the paid action
     - Pricing formula: 0.005 + 0.00005*runtimeMinutes + 0.0005*cores + 0.0005*(memoryMB/1024) + 0.0002*diskGB (round to 4 decimals, prefix with $)
 
@@ -307,6 +311,10 @@ async def lease_container(
         )
     if not password:
         raise ValueError("Please provide a container password (min 6 chars) before leasing a container.")
+    if not confirmPassword:
+        raise ValueError("Please confirm the container password before leasing a container.")
+    if not passwordConfirm or passwordConfirm != password:
+        raise ValueError("Please re-type the container password to confirm it (must match).")
 
     payload = LeaseRequest(
         sku=sku,
