@@ -162,12 +162,43 @@ def require_payment(
 
         # Decode payment header
         try:
+            logger.info(f"📨 Raw X-PAYMENT header (first 100 chars): {payment_header[:100]}...")
+            logger.info(f"📨 X-PAYMENT header length: {len(payment_header)}")
+            
             payment_dict = json.loads(safe_base64_decode(payment_header))
+            logger.info(f"🔓 Decoded payment header: {json.dumps(payment_dict, indent=2)}")
+            
             payment = PaymentPayload(**payment_dict)
+            
+            # Detailed signature analysis
+            sig = payment.payload.signature  # Pydantic model attribute
+            logger.info(f"🔍 Signature Analysis:")
+            logger.info(f"  - Raw signature: {sig}")
+            logger.info(f"  - Signature length: {len(sig)} chars (expected: 132 for EOA, >132 for Smart Wallet)")
+            logger.info(f"  - Signature type: {'EOA (65 bytes)' if len(sig) == 132 else 'Possibly Smart Wallet (ABI-encoded)' if len(sig) > 132 else 'INVALID - Too short'}")
+            
+            # Analyze signature structure
+            if len(sig) > 2:
+                sig_data = sig[2:]  # Remove 0x
+                logger.info(f"  - First 64 chars (r or offset): {sig_data[:64]}")
+                logger.info(f"  - Second 64 chars (s or length): {sig_data[64:128] if len(sig_data) > 64 else 'N/A'}")
+                logger.info(f"  - Remaining data: {sig_data[128:] if len(sig_data) > 128 else 'N/A'}")
+            
+            # Log authorization details
+            auth = payment.payload.authorization  # Pydantic model attribute
+            logger.info(f"💳 Authorization Details:")
+            logger.info(f"  - From: {auth.from_}")
+            logger.info(f"  - To: {auth.to}")
+            logger.info(f"  - Value: {auth.value}")
+            logger.info(f"  - ValidAfter: {auth.valid_after}")
+            logger.info(f"  - ValidBefore: {auth.valid_before}")
+            logger.info(f"  - Nonce: {auth.nonce}")
+            
         except Exception as e:
             logger.warning(
                 f"Invalid payment header format from {request.client.host if request.client else 'unknown'}: {str(e)}"
             )
+            logger.error(f"❌ Decoding error details: {type(e).__name__}: {str(e)}")
             return x402_response("Invalid payment header format")
 
         # Find matching payment requirements
@@ -176,15 +207,38 @@ def require_payment(
         )
 
         if not selected_payment_requirements:
+            logger.error("❌ No matching payment requirements found")
+            logger.error(f"  - Payment scheme: {payment.scheme}")
+            logger.error(f"  - Payment network: {payment.network}")
+            logger.error(f"  - Available requirements: {[req.scheme + '/' + req.network for req in payment_requirements]}")
             return x402_response("No matching payment requirements found")
+        
+        logger.info(f"✅ Matched payment requirements: scheme={selected_payment_requirements.scheme}, network={selected_payment_requirements.network}")
+        logger.info(f"🔐 EIP-712 Domain (from backend):")
+        logger.info(f"  - name: {selected_payment_requirements.extra.get('name')}")
+        logger.info(f"  - version: {selected_payment_requirements.extra.get('version')}")
+        logger.info(f"  - chainId: {network}")
+        logger.info(f"  - verifyingContract: {selected_payment_requirements.asset}")
 
         # Verify payment
+        logger.info(f"📤 Sending verification request to facilitator...")
         verify_response = await facilitator.verify(
             payment, selected_payment_requirements
         )
+        
+        logger.info(f"📥 Facilitator verification response:")
+        logger.info(f"  - isValid: {verify_response.is_valid}")
+        logger.info(f"  - invalidReason: {verify_response.invalid_reason}")
+        logger.info(f"  - payer: {verify_response.payer}")
 
         if not verify_response.is_valid:
             error_reason = verify_response.invalid_reason or "Unknown error"
+            logger.error(f"❌ Payment verification FAILED: {error_reason}")
+            logger.error(f"📋 Debugging checklist:")
+            logger.error(f"  1. Check signature length (should be 132 for EOA, or properly encoded for Smart Wallet)")
+            logger.error(f"  2. Verify EIP-712 domain matches between frontend and backend")
+            logger.error(f"  3. Check if Smart Wallet signature needs special handling")
+            logger.error(f"  4. Validate nonce, validAfter, validBefore timestamps")
             return x402_response(f"Invalid payment: {error_reason}")
 
         request.state.payment_details = selected_payment_requirements

@@ -108,6 +108,7 @@ async def container(request_body: LeaseRequest, request: Request) -> LeaseRespon
     record_container_lease(
         lease_id=lease_response.leaseId,
         ctid=vmid,
+        sku=request_body.sku,
         owner_wallet=owner_wallet,
         network=NETWORK,
         status=lease_response.status,
@@ -159,72 +160,6 @@ def _get_verified_payer(request: Request) -> str:
             detail="Missing payment verification",
         )
     return verify.payer
-
-
-# @router.post("/{ctid}/command", response_model=ExecResponse)
-# async def exec_command(ctid: str, body: ExecRequest, request: Request) -> ExecResponse:
-#     payer = _get_verified_payer(request)
-#     _require_active_lease(ctid, payer)
-#     cfg = get_config()
-
-#     try:
-#         result = await run_command(cfg, vmid=ctid, command=body.command, extra_args=body.extraArgs)
-#     except PVEError as exc:
-#         raise HTTPException(
-#             status_code=status.HTTP_502_BAD_GATEWAY,
-#             detail=f"PVE error: {exc}",
-#         ) from exc
-
-#     return ExecResponse(ctid=ctid, upid=result["upid"], output=result["output"])
-
-
-# @router.post("/{ctid}/console", response_model=ConsoleResponse)
-# async def console(ctid: str, body: ConsoleRequest, request: Request, response: Response) -> ConsoleResponse:
-#     payer = _get_verified_payer(request)
-#     _require_active_lease(ctid, payer)
-#     cfg = get_config()
-
-#     if body.consoleType not in (None, "vnc", "spice"):
-#         raise HTTPException(
-#             status_code=status.HTTP_400_BAD_REQUEST,
-#             detail="Unsupported console type",
-#         )
-
-#     try:
-#         access_ticket = await get_access_ticket(cfg)
-#         data = await create_vnc_proxy(cfg, vmid=ctid)
-#         if not data.get("ticket"):
-#             raise PVEError("VNC proxy did not return a ticket")
-#     except PVEError as exc:
-#         raise HTTPException(
-#             status_code=status.HTTP_502_BAD_GATEWAY,
-#             detail=f"PVE error: {exc}",
-#         ) from exc
-
-#     console_url = build_console_url(cfg, vmid=ctid, vncticket=data.get("ticket"))
-#     auth_cookie = access_ticket.get("ticket")
-#     if auth_cookie:
-#         response.set_cookie(
-#             "PVEAuthCookie",
-#             auth_cookie,
-#             domain=(cfg.host.split("//")[-1].split(":")[0]),
-#             secure=True,
-#             httponly=True,
-#             samesite="lax",
-#         )
-
-#     return ConsoleResponse(
-#         ctid=ctid,
-#         host=cfg.host,
-#         port=int(data.get("port")),
-#         ticket=data.get("ticket"),
-#         user=data.get("user"),
-#         cert=data.get("cert"),
-#         websocket=data.get("websocket"),
-#         proxy=data.get("proxy"),
-#         consoleUrl=console_url,
-#         authCookie=auth_cookie,
-#     )
 
 
 @router.post("/{ctid}/renew", response_model=LeaseResponse)

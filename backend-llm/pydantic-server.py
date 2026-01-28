@@ -5,7 +5,7 @@ from typing import Any, Literal, Dict, Optional
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from decimal import Decimal
 
@@ -72,12 +72,13 @@ agent = Agent(
         "You are a chatbot that can create paid LXC leases via x402.\n"
         "- Before any paid action, calculate and show the estimated USD price using this formula and ask the user to confirm. Only submit lease_container or renew_lease after the user explicitly approves and set confirmPurchase=True on that call.\n"
         "  price = 0.005 + 0.00005*runtimeMinutes + 0.0005*cores + 0.0005*(memoryMB/1024) + 0.0002*diskGB (rounded to 4 decimals, prefixed with $)\n"
-        "- For new leases, collect a default container password from the user and include confirmPurchase=True only after they confirm the cost.\n"
+        "- For new leases, collect a default container password and ask the user to confirm it by re-typing. Only proceed if they match; include confirmPassword=True and passwordConfirm when calling lease_container. Also include confirmPurchase=True only after they confirm the cost.\n"
         "- Call lease_container to spin up or lease a container (required: sku, runtimeMinutes, password; use defaults otherwise).\n"
         "- Call renew_lease to extend an existing lease (ctid + runtimeMinutes) and restart it if needed; confirm price first and set confirmPurchase=True when proceeding.\n"
         "- Call exec_container_command (management route) or exec_lease_command (lease route) to run commands on an existing container.\n"
         "- Call open_container_console to request console access via the management route (ctid; consoleType optional, default vnc). open_lease_console is a backward-compatible alias.\n"
         "- Call list_managed_containers to see existing leases and their VM status.\n"
+        "- Call get_node_stats or list_lxc_stats to fetch free usage stats (provide wallet header if required).\n"
         "- Explain briefly when you submit a lease or run management actions."
     ),
 )
@@ -85,6 +86,29 @@ agent = Agent(
 
 def backend_base_url() -> str:
     return os.getenv("BACKEND_BASE_URL", "http://localhost:4021").rstrip("/")
+
+
+def _forward_auth_headers(request: Request) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for header_name in ("X-Wallet", "X-Payment"):
+        value = request.headers.get(header_name)
+        if value:
+            headers[header_name] = value
+    return headers
+
+
+async def _proxy_get_json(path: str, request: Request) -> Any:
+    async with httpx.AsyncClient(base_url=backend_base_url(), timeout=20.0) as client:
+        resp = await client.get(path, headers=_forward_auth_headers(request))
+
+    if resp.status_code >= 400:
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    return resp.json()
 
 
 class LeaseRequest(BaseModel):
@@ -156,6 +180,37 @@ class ManagedContainer(BaseModel):
     vmStatus: dict[str, Any] | None = None
 
 
+class UsageStats(BaseModel):
+    used: int | None = None
+    total: int | None = None
+    free: int | None = None
+    pct: float | None = None
+
+
+class CpuStats(BaseModel):
+    usage: float | None = None
+    cores: int | None = None
+    pct: float | None = None
+
+
+class NodeStatsResponse(BaseModel):
+    node: str
+    cpu: CpuStats
+    memory: UsageStats
+    disk: UsageStats
+
+
+class LxcStats(BaseModel):
+    leaseId: str
+    ctid: str
+    sku: str | None = None
+    status: str | None = None
+    cpu: CpuStats | None = None
+    memory: UsageStats | None = None
+    disk: UsageStats | None = None
+    error: str | None = None
+
+
 def _client(deps: Deps) -> httpx.AsyncClient:
     """
     Create a standard httpx client.
@@ -170,6 +225,15 @@ def _client(deps: Deps) -> httpx.AsyncClient:
         headers=headers,
         timeout=60.0,
     )
+
+
+def _headers_with_wallet(deps: Deps, wallet: str | None) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if deps.payment_headers:
+        headers.update(deps.payment_headers)
+    if wallet:
+        headers["X-Wallet"] = wallet
+    return headers
 
 async def _check_response(resp: httpx.Response):
     """
@@ -219,6 +283,8 @@ async def lease_container(
     hostname: str | None = None,
     requester: str | None = None,
     password: str | None = None,
+    passwordConfirm: str | None = None,
+    confirmPassword: bool = False,
     confirmPurchase: bool = False,
 ) -> LeaseResponse:
     """
@@ -231,6 +297,8 @@ async def lease_container(
 
     Optional:
     - cores, memoryMB, diskGB, hostname, requester
+    - passwordConfirm: re-typed password, must match password
+    - confirmPassword: must be True to proceed after user confirms password
     - confirmPurchase: must be True to proceed with the paid action
     - Pricing formula: 0.005 + 0.00005*runtimeMinutes + 0.0005*cores + 0.0005*(memoryMB/1024) + 0.0002*diskGB (round to 4 decimals, prefix with $)
 
@@ -243,6 +311,10 @@ async def lease_container(
         )
     if not password:
         raise ValueError("Please provide a container password (min 6 chars) before leasing a container.")
+    if not confirmPassword:
+        raise ValueError("Please confirm the container password before leasing a container.")
+    if not passwordConfirm or passwordConfirm != password:
+        raise ValueError("Please re-type the container password to confirm it (must match).")
 
     payload = LeaseRequest(
         sku=sku,
@@ -294,7 +366,7 @@ async def exec_lease_command(
     extraArgs: list[str] | None = None,
 ) -> ExecResponse:
     """
-    Execute a command on a leased container via `/lease/{ctid}/command`.
+    Execute a command on a leased container (compat alias).
 
     Required:
     - ctid: container ID
@@ -306,7 +378,7 @@ async def exec_lease_command(
     payload = ExecRequest(command=command, extraArgs=extraArgs)
 
     async with _client(ctx.deps) as client:
-        resp = await client.post(f"/lease/{ctid}/command", json=payload.model_dump(exclude_none=True))
+        resp = await client.post(f"/management/exec/{ctid}", json=payload.model_dump(exclude_none=True))
         await _check_response(resp)
         return ExecResponse.model_validate(resp.json())
 
@@ -369,18 +441,13 @@ async def open_lease_console(
     consoleType: str | None = "vnc",
 ) -> ConsoleResponse:
     """
-    Request console access for a leased container via `/management/console/{ctid}`.
+    Request console access for a leased container (compat alias).
 
     Args:
     - ctid: container ID
     - consoleType: "vnc" (default) or "spice"
     """
-    payload = ConsoleRequest(consoleType=consoleType)
-
-    async with _client(ctx.deps) as client:
-        resp = await client.post(f"/management/console/{ctid}", json=payload.model_dump(exclude_none=True))
-        await _check_response(resp)
-        return ConsoleResponse.model_validate(resp.json())
+    return await open_container_console(ctx, ctid=ctid, consoleType=consoleType)
 
 
 @agent.tool
@@ -393,6 +460,51 @@ async def list_managed_containers(ctx: RunContext[Deps]) -> list[ManagedContaine
         await _check_response(resp)
         raw_list = resp.json()
         return [ManagedContainer.model_validate(item) for item in raw_list]
+
+
+@agent.tool
+async def get_node_stats(
+    ctx: RunContext[Deps],
+    wallet: str | None = None,
+) -> NodeStatsResponse:
+    """
+    Fetch node CPU/RAM/disk usage via `/stats/node`.
+
+    Optional:
+    - wallet: address to send via X-Wallet header for mock auth
+    """
+    headers = _headers_with_wallet(ctx.deps, wallet)
+    async with httpx.AsyncClient(
+        base_url=backend_base_url(),
+        headers=headers,
+        timeout=60.0,
+    ) as client:
+        resp = await client.get("/stats/node")
+        await _check_response(resp)
+        return NodeStatsResponse.model_validate(resp.json())
+
+
+@agent.tool
+async def list_lxc_stats(
+    ctx: RunContext[Deps],
+    wallet: str | None = None,
+) -> list[LxcStats]:
+    """
+    Fetch CPU/RAM/disk usage for owned containers via `/stats/lxc`.
+
+    Optional:
+    - wallet: address to send via X-Wallet header for mock auth
+    """
+    headers = _headers_with_wallet(ctx.deps, wallet)
+    async with httpx.AsyncClient(
+        base_url=backend_base_url(),
+        headers=headers,
+        timeout=60.0,
+    ) as client:
+        resp = await client.get("/stats/lxc")
+        await _check_response(resp)
+        raw_list = resp.json()
+        return [LxcStats.model_validate(item) for item in raw_list]
 
 
 # ---------- FastAPI wrapper around the agent ----------
@@ -482,6 +594,16 @@ async def info() -> InfoResponse:
         model_name=model_name,
         api_key=masked_key,
     )
+
+
+@app.get("/stats/node")
+async def stats_node(request: Request) -> Any:
+    return await _proxy_get_json("/stats/node", request)
+
+
+@app.get("/stats/lxc")
+async def stats_lxc(request: Request) -> Any:
+    return await _proxy_get_json("/stats/lxc", request)
 
 
 # Test with
