@@ -35,6 +35,7 @@ Provisions a new LXC container.
   "password": "root_password_here"
 }
 ```
+`runtimeMinutes` is any positive integer minutes (no 1-hour minimum).
 
 #### Renew Lease
 **POST** `/lease/{ctid}/renew`
@@ -47,6 +48,7 @@ Extends the runtime of an active container.
   "runtimeMinutes": 30
 }
 ```
+`runtimeMinutes` is any positive integer minutes (no 1-hour minimum).
 
 #### Execute Command
 **POST** `/management/exec/{ctid}`

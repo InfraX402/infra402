@@ -75,6 +75,7 @@ agent = Agent(
         "- For new leases, collect a default container password and ask the user to confirm it by re-typing. Only proceed if they match; include confirmPassword=True and passwordConfirm when calling lease_container. Also include confirmPurchase=True only after they confirm the cost.\n"
         "- Call lease_container to spin up or lease a container (required: sku, runtimeMinutes, password; use defaults otherwise).\n"
         "- Call renew_lease to extend an existing lease (ctid + runtimeMinutes) and restart it if needed; confirm price first and set confirmPurchase=True when proceeding.\n"
+        "- runtimeMinutes is any positive integer minutes (no 1-hour minimum).\n"
         "- Call exec_container_command (management route) or exec_lease_command (lease route) to run commands on an existing container.\n"
         "- Call open_container_console to request console access via the management route (ctid; consoleType optional, default vnc). open_lease_console is a backward-compatible alias.\n"
         "- Call list_managed_containers to see existing leases and their VM status.\n"
